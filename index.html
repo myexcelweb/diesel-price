@@ -89,6 +89,12 @@
     gap: 4px;
   }
 
+  .wef-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
   #wefInput {
     text-align: center;
     font-family: Arial, Helvetica, sans-serif;
@@ -97,14 +103,32 @@
     border: none;
     background: #fff9e0;
     outline: none;
-    padding: 2px 4px;
+    padding: 2px 20px 2px 4px;
     border-radius: 3px;
-    width: 130px;
-    color: #000;
+    width: 100px;
+    color: transparent;
   }
   #wefInput:focus { background: #fff2b0; }
   #wefInput::-webkit-calendar-picker-indicator {
     cursor: pointer;
+    position: absolute;
+    right: 2px;
+  }
+
+  #wefDisplay {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80px;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    color: #000;
   }
 
   .price-cell {
@@ -133,6 +157,11 @@
     margin: 0;
   }
 
+  .pdf-export #priceInput,
+  .pdf-export #wefInput {
+    background: #ffffff !important;
+  }
+
   @keyframes blinkWarn {
     0%, 100% { background: #ffb3b3; }
     50% { background: #fff3cd; }
@@ -152,7 +181,7 @@
   }
 
   .band {
-    background: #f2f2f2;
+    background: #d6d6d6;
   }
 
   thead th {
@@ -208,7 +237,10 @@
           <th class="title-cell" colspan="3">
             <div class="title-main">Diesel&nbsp;Sales&nbsp;Price</div>
             <div class="title-wef">W.&nbsp;e.&nbsp;f.
-              <input type="date" id="wefInput" value="">
+              <span class="wef-wrap">
+                <input type="date" id="wefInput" value="">
+                <span id="wefDisplay">Not set</span>
+              </span>
             </div>
           </th>
           <th class="price-cell">
@@ -274,13 +306,23 @@
     updateBlinkStates();
   }
 
+  function formatDMY(isoDate) {
+    var parts = (isoDate || '').split('-');
+    if (parts.length !== 3) return '';
+    return parts[2] + '/' + parts[1] + '/' + parts[0];
+  }
+
   function updateBlinkStates() {
     var priceInput = document.getElementById('priceInput');
     var wefInput = document.getElementById('wefInput');
+    var wefDisplay = document.getElementById('wefDisplay');
     var price = parseFloat(priceInput.value);
 
     priceInput.classList.toggle('blink-warn', isNaN(price) || price === 0);
     wefInput.classList.toggle('blink-warn', wefInput.value.trim() === '');
+
+    var formatted = formatDMY(wefInput.value);
+    wefDisplay.textContent = formatted || 'Not set';
   }
 
   function setStickyOffsets() {
@@ -294,27 +336,103 @@
 
   async function buildPdfBlob() {
     var table = document.getElementById('priceTable');
-    var canvas = await html2canvas(table, { scale: 2, backgroundColor: '#ffffff' });
-    var imgData = canvas.toDataURL('image/png');
-    var jsPDF = window.jspdf.jsPDF;
-    var pdf = new jsPDF({
-      orientation: canvas.width > canvas.height ? 'landscape' : 'portrait',
-      unit: 'pt',
-      format: 'a4'
-    });
-    var pageWidth = pdf.internal.pageSize.getWidth();
-    var pageHeight = pdf.internal.pageSize.getHeight();
-    var margin = 24;
-    var ratio = canvas.width / canvas.height;
-    var w = pageWidth - margin * 2;
-    var h = w / ratio;
-    if (h > pageHeight - margin * 2) {
-      h = pageHeight - margin * 2;
-      w = h * ratio;
+    var thead = table.querySelector('thead');
+    var dataRows = Array.prototype.slice.call(table.querySelectorAll('tbody tr'));
+
+    var tableRect = table.getBoundingClientRect();
+    var theadRect = thead.getBoundingClientRect();
+
+    document.body.classList.add('pdf-export');
+    var canvas;
+    try {
+      canvas = await html2canvas(table, { scale: 3, backgroundColor: '#ffffff' });
+    } finally {
+      document.body.classList.remove('pdf-export');
     }
-    var x = (pageWidth - w) / 2;
-    var y = (pageHeight - h) / 2;
-    pdf.addImage(imgData, 'PNG', x, y, w, h);
+
+    function toCanvasY(clientY) {
+      return ((clientY - tableRect.top) / tableRect.height) * canvas.height;
+    }
+
+    var headerHeightPx = Math.round(toCanvasY(theadRect.bottom));
+
+    var headerCanvas = document.createElement('canvas');
+    headerCanvas.width = canvas.width;
+    headerCanvas.height = headerHeightPx;
+    headerCanvas.getContext('2d').drawImage(
+      canvas, 0, 0, canvas.width, headerHeightPx, 0, 0, canvas.width, headerHeightPx
+    );
+
+    var bodyHeightPx = canvas.height - headerHeightPx;
+    var bodyCanvas = document.createElement('canvas');
+    bodyCanvas.width = canvas.width;
+    bodyCanvas.height = bodyHeightPx;
+    bodyCanvas.getContext('2d').drawImage(
+      canvas, 0, headerHeightPx, canvas.width, bodyHeightPx, 0, 0, canvas.width, bodyHeightPx
+    );
+
+    // Row boundaries (in bodyCanvas-local px) so page breaks never fall mid-row.
+    var rowBounds = dataRows.map(function (row) {
+      var r = row.getBoundingClientRect();
+      return {
+        top: toCanvasY(r.top) - headerHeightPx,
+        bottom: toCanvasY(r.bottom) - headerHeightPx
+      };
+    });
+
+    var jsPDF = window.jspdf.jsPDF;
+    var pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+
+    var pageWidthMM = pdf.internal.pageSize.getWidth();
+    var pageHeightMM = pdf.internal.pageSize.getHeight();
+    var marginMM = 10;
+    var usableWidthMM = pageWidthMM - marginMM * 2;
+    var usableHeightMM = pageHeightMM - marginMM * 2;
+
+    var pxPerMM = canvas.width / usableWidthMM;
+    var pageHeightPx = usableHeightMM * pxPerMM;
+    var perPageBodyPx = pageHeightPx - headerHeightPx;
+
+    // Group rows into pages, only breaking between whole rows.
+    var pageSlices = [];
+    var idx = 0;
+    while (idx < rowBounds.length) {
+      var startPx = rowBounds[idx].top;
+      var endIdx = idx;
+      while (
+        endIdx + 1 < rowBounds.length &&
+        (rowBounds[endIdx + 1].bottom - startPx) <= perPageBodyPx
+      ) {
+        endIdx++;
+      }
+      pageSlices.push({ startPx: startPx, endPx: rowBounds[endIdx].bottom });
+      idx = endIdx + 1;
+    }
+
+    for (var i = 0; i < pageSlices.length; i++) {
+      var startPx = Math.round(pageSlices[i].startPx);
+      var endPx = Math.round(pageSlices[i].endPx);
+      var sliceHeight = endPx - startPx;
+
+      var pageCanvas = document.createElement('canvas');
+      pageCanvas.width = canvas.width;
+      pageCanvas.height = headerHeightPx + sliceHeight;
+      var ctx = pageCanvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+      ctx.drawImage(headerCanvas, 0, 0);
+      ctx.drawImage(
+        bodyCanvas, 0, startPx, canvas.width, sliceHeight,
+        0, headerHeightPx, canvas.width, sliceHeight
+      );
+
+      var imgData = pageCanvas.toDataURL('image/png');
+      var imgHeightMM = pageCanvas.height / pxPerMM;
+
+      if (i > 0) pdf.addPage();
+      pdf.addImage(imgData, 'PNG', marginMM, marginMM, usableWidthMM, imgHeightMM);
+    }
+
     return pdf.output('blob');
   }
 
